@@ -1,0 +1,661 @@
+```{r}
+library(slingshot)
+library(tradeSeq)
+library(pheatmap)
+library(ggplot2)
+library(tidyverse)
+library(tidymodels)
+library(scales)
+library(BUSpaRse)
+library(viridis)
+library(Matrix)
+library(Seurat)
+```
+
+```{r}
+output_dir <- "~/Slingshot_Tracy/results/"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+n_top_genes <- 250
+
+set.seed(83)
+```
+
+```{r Sligshot, echo=TRUE, error=TRUE, message=TRUE, warning=TRUE}
+fobj <- readRDS("~/Slingshot_Tracy/Fabio_finalobj.rds")
+
+DefaultAssay(fobj) <- "RNA"
+Idents(fobj) <- "tracy_clusters"
+fobj <- JoinLayers(fobj)
+
+sobj_sce <- as.SingleCellExperiment(fobj)
+
+umap <- Embeddings(fobj, "umap")
+celltype <- fobj$tracy_clusters
+
+lineages <- slingshot::slingshot(umap, 
+                                  clusterLabels = celltype,
+                                  stretch = 0)
+
+sds <- SlingshotDataSet(lineages)
+pt <- slingPseudotime(lineages)
+
+cell_colors_clust <- hue_pal()(length(unique(fobj$tracy_clusters)))
+names(cell_colors_clust) <- sort(unique(fobj$tracy_clusters))
+colors <- cell_colors_clust[as.character(fobj$tracy_clusters)]
+
+# Lineages 그리기
+plot(slingReducedDim(lineages), col = colors, pch = 16, cex = 0.5)
+lines(lineages, lwd = 2, type = 'lineages', col = 'black')
+
+# Principal curves 그리기
+plot(slingReducedDim(sds), col = colors, pch = 16, cex = 0.5)
+lines(sds, lwd = 2, col = 'black')
+
+par(mfrow = c(2, 3))
+pal <- viridis(100, end = 0.95)
+
+for (i in colnames(pt)) {
+  colors <- pal[cut(pt[,i], breaks = 100)]
+  plot(reducedDim(sds), col = colors, pch = 16, cex = 0.5, main = i)
+  lines(sds, lwd = 2, col = 'black')
+}
+```
+
+```{r}
+DefaultAssay(fobj) <- "SCT"
+fobj <- Seurat::SCTransform(fobj, verbose = FALSE)
+
+top_hvg <- SeuratObject::HVFInfo(fobj) %>% 
+  dplyr::mutate(., bc = rownames(.)) %>% 
+  dplyr::arrange(desc(residual_variance)) %>% 
+  dplyr::top_n(300, residual_variance) %>% 
+  dplyr::pull(bc)
+
+# Prepare data for random forest
+dat_use <- t(GetAssayData(fobj, slot = "data")[top_hvg,])
+dat_use_df <- cbind(slingPseudotime(sds)[,2], dat_use) # Do curve 2, so 2nd columnn
+colnames(dat_use_df)[1] <- "pseudotime"
+dat_use_df <- as.data.frame(dat_use_df[!is.na(dat_use_df[,1]),])
+
+dat_split <- initial_split(dat_use_df)
+dat_train <- training(dat_split)
+dat_val <- testing(dat_split)
+
+model <- rand_forest(mtry = 200, trees = 1400, min_n = 15, mode = "regression") %>%
+  set_engine("ranger", importance = "impurity", num.threads = 3) %>%
+  fit(pseudotime ~ ., data = dat_train)
+
+val_results <- dat_val %>% 
+  mutate(estimate = predict(model, .[,-1]) %>% pull()) %>% 
+  select(truth = pseudotime, estimate)
+metrics(data = val_results, truth, estimate)
+
+summary(dat_use_df$pseudotime)
+
+var_imp <- sort(model$fit$variable.importance, decreasing = TRUE)
+top_genes <- names(var_imp)[1:6]
+
+# Convert to gene symbol
+gns <- tr2g_ensembl(species = "Mus musculus", use_gene_name = TRUE, 
+                    ensembl_version = 97)[,c("gene", "gene_name")] %>% 
+  distinct()
+top_gene_name <- gns$gene_name[match(top_genes, gns$gene)]
+
+par(mfrow = c(2, 3))
+for (i in seq_along(top_genes)) {
+  colors <- pal[cut(dat_use[,top_genes[i]], breaks = 100)]
+  plot(reducedDim(sds), col = colors, 
+       pch = 16, cex = 0.5, main = top_genes[i])
+  lines(sds, lwd = 2, col = 'black', type = 'lineages')
+}
+```
+
+# ---- Subset
+```{r}
+# subset
+unique(fobj$tracy_clusters)
+Seurat::Idents(fobj) <- "tracy_clusters"
+sub <- subset(fobj, subset = tracy_clusters %in% c("CA1", "CA3", "DG", "Tbr2_Prog", "KI67_Prog", "Pax6_Prog"))
+
+Seurat::DimPlot(sub, label = T)
+
+```
+```{r}
+DefaultAssay(sub) <- "SCT"   #
+sub <- SCTransform(sub, verbose = FALSE)  
+
+sub <- RunPCA(sub, npcs = 50, verbose = FALSE)
+sub <- RunUMAP(sub, dims = 1:30, verbose = FALSE)   
+sub <- FindNeighbors(sub, dims = 1:30)
+sub <- FindClusters(sub, resolution = 0.4)     
+
+
+sce <- as.SingleCellExperiment(sub)
+reducedDims(sce)$PCA <- Embeddings(sub, "pca")
+colData(sce)$cluster <- Idents(sub)
+
+sce <- slingshot(
+  sce,
+  clusterLabels = "tracy_clusters",
+  reducedDim    = "PCA",
+  start.clus    = "Pax6_Prog",
+  end.clus      = c("CA1","CA3","DG"),
+  stretch       = 1.0
+)
+
+
+sds <- SlingshotDataSet(sce)
+pt  <- slingPseudotime(sce)   
+
+
+cols_clust <- scales::hue_pal()(length(levels(colData(sce)$cluster)))
+names(cols_clust) <- levels(colData(sce)$cluster)
+col_by_cluster <- cols_clust[as.character(colData(sce)$cluster)]
+
+
+
+um <- Embeddings(sub, "umap")
+col_by_cluster <- cols_clust[as.character(Idents(sub))]
+
+plot(reducedDims(sce)$PCA, col = col_by_cluster, pch = 16, cex = 0.5,
+     main = "Principal curves (PCA)")
+lines(SlingshotDataSet(sce), lwd = 2, col = "black")
+
+plot(slingReducedDim(sds), col = col_by_cluster, pch = 16, cex = 0.5,
+     main = "Principal curves (PCA)")
+lines(sds, lwd = 2, col = "black")
+
+par(mfrow = c(2,3))
+
+rd <- slingReducedDim(sds)             
+stopifnot(identical(rownames(rd), rownames(pt))) 
+
+for (i in colnames(pt)) {
+  pt_i <- pt[, i]                         
+  ok <- !is.na(pt_i)
+  cols_pt <- pt_pal[cut(pt_i[ok], breaks = 100, include.lowest = TRUE)]
+  
+  plot(rd[ok, ], col = cols_pt, pch = 16, cex = 0.5, main = paste("PT:", i))
+  lines(sds, lwd = 2, col = 'black')
+}
+
+Idents(sub) <- "tracy_clusters"
+DimPlot(sub, label = T)
+
+sub$pt_curve2 <- pt[, 2]
+
+L <- slingLineages(sds)
+L
+
+cl   <- as.character(colData(sce)$tracy_clusters) 
+W    <- slingCurveWeights(sce)              
+PT   <- slingPseudotime(sce)              
+
+
+lin_assign <- apply(W, 1, function(x) if (all(is.na(x)) || max(x, na.rm=TRUE)==0) NA_integer_ else which.max(x))
+table(lin_assign, useNA="ifany")
+
+
+tab_cnt <- table(lin_assign, cl)
+tab_prop_by_lin <- prop.table(tab_cnt, margin = 1)  # 리니지별 비율
+tab_cnt
+round(tab_prop_by_lin, 3)
+
+k <- 1
+pt_k <- PT[, k]
+ord_df <- aggregate(pt_k, by = list(cluster = cl), FUN = function(v) median(v, na.rm=TRUE))
+ord_df <- ord_df[order(ord_df$x), ]
+ord_df
+```
+
+# ----
+```{r}
+Seurat::DefaultAssay(sub) <- "RNA"
+
+Idents(sub) <- "sub_cluster"
+
+DimPlot(sub)
+
+umap <- Seurat::Embeddings(sub, "umap")
+celltype <- sub$tracy_clusters
+
+lineages <- slingshot::slingshot(umap, 
+                                  clusterLabels = celltype,
+                                  stretch = 0)
+
+sds <- SlingshotDataSet(lineages)
+pt <- slingPseudotime(lineages)
+
+cell_colors_clust <- hue_pal()(length(unique(sub$tracy_clusters)))
+names(cell_colors_clust) <- sort(unique(sub$tracy_clusters))
+colors <- cell_colors_clust[as.character(sub$tracy_clusters)]
+
+# Lineages 그리기
+plot(slingReducedDim(lineages), col = colors, pch = 16, cex = 0.5)
+lines(lineages, lwd = 2, type = 'lineages', col = 'black')
+
+# Principal curves 그리기
+plot(slingReducedDim(sds), col = colors, pch = 16, cex = 0.5)
+lines(sds, lwd = 2, col = 'black')
+
+par(mfrow = c(1, 2))
+pal <- viridis::viridis(100, end = 0.95)
+
+for (i in colnames(pt)) {
+  colors <- pal[cut(pt[,i], breaks = 100)]
+  plot(reducedDim(sds), col = colors, pch = 16, cex = 0.5, main = i)
+  lines(sds, lwd = 2, col = 'black')
+}
+
+DimPlot(sub, label = T)
+
+DefaultAssay(sub) <- "RNA"
+sub <- NormalizeData(sub)
+sub <- FindVariableFeatures(sub)
+
+top_hvg <- VariableFeatures(sub)[1:300]
+
+dat_use <- t(GetAssayData(sub, assay = "RNA", slot = "data")[top_hvg, , drop=FALSE])
+
+pt2 <- slingPseudotime(sds)[, 2]
+common <- intersect(rownames(dat_use), names(pt2))
+pt2 <- pt2[common]
+dat_use <- dat_use[common, , drop = FALSE]
+ok <- !is.na(pt2)
+dat_use_df <- data.frame(pseudotime = pt2[ok], dat_use[ok, , drop=FALSE])
+
+dat_split <- initial_split(dat_use_df)
+dat_train <- training(dat_split)
+dat_val   <- testing(dat_split)
+
+model <- rand_forest(mtry = 200, trees = 1400, min_n = 15, mode = "regression") |>
+  set_engine("ranger", importance = "impurity", num.threads = 3) |>
+  fit(pseudotime ~ ., data = dat_train)
+
+val_results <- dat_val |>
+  mutate(estimate = predict(model, dat_val |> dplyr::select(-pseudotime)) |> dplyr::pull()) |>
+  dplyr::select(truth = pseudotime, estimate)
+
+rmse(val_results, truth, estimate)
+rsq(val_results, truth, estimate)
+
+var_imp <- sort(model$fit$variable.importance, decreasing = TRUE)
+top_genes <- names(var_imp)[1:6]
+
+pal <- viridisLite::viridis(100, end = 0.95)
+rd  <- slingReducedDim(sds)                  
+stopifnot(identical(rownames(rd), names(slingPseudotime(sds)[,1])))
+
+par(mfrow = c(2,3))
+for (g in top_genes) {
+  x <- dat_use_df[[g]]
+  rd_plot <- rd[ rownames(dat_use_df), , drop = FALSE]
+  cols <- pal[cut(x, breaks = 100, include.lowest = TRUE)]
+  plot(rd_plot, col = cols, pch = 16, cex = 0.5, main = g)
+  lines(sds, lwd = 2, col = "black")
+}
+```
+
+
+```{r}
+DefaultAssay(sub) <- "SCT"
+
+DimPlot(sub)
+
+# Add log normalization 
+# (This does not affect SCT-based integration)
+solo_process <- Seurat::NormalizeData(solo_process, assay = "RNA")
+top_hvg <- SeuratObject::HVFInfo(sub) %>% 
+  dplyr::mutate(., bc = rownames(.)) %>% 
+  dplyr::arrange(desc(residual_variance)) %>% 
+  dplyr::top_n(300, residual_variance) %>% 
+  dplyr::pull(bc)
+
+# Prepare data for random forest
+dat_use <- t(GetAssayData(sub, slot = "data")[top_hvg,])
+dat_use_df <- cbind(slingPseudotime(sds)[,2], dat_use) # Do curve 2, so 2nd columnn
+colnames(dat_use_df)[1] <- "pseudotime"
+dat_use_df <- as.data.frame(dat_use_df[!is.na(dat_use_df[,1]),])
+
+dat_split <- initial_split(dat_use_df)
+dat_train <- training(dat_split)
+dat_val <- testing(dat_split)
+
+model <- rand_forest(mtry = 200, trees = 1400, min_n = 15, mode = "regression") %>%
+  set_engine("ranger", importance = "impurity", num.threads = 3) %>%
+  fit(pseudotime ~ ., data = dat_train)
+
+val_results <- dat_val %>% 
+  mutate(estimate = predict(model, .[,-1]) %>% pull()) %>% 
+  select(truth = pseudotime, estimate)
+metrics(data = val_results, truth, estimate)
+
+summary(dat_use_df$pseudotime)
+
+var_imp <- sort(model$fit$variable.importance, decreasing = TRUE)
+top_genes <- names(var_imp)[1:6]
+
+# Convert to gene symbol
+gns <- tr2g_ensembl(species = "Mus musculus", use_gene_name = TRUE, 
+                    ensembl_version = 97)[,c("gene", "gene_name")] %>% 
+  distinct()
+top_gene_name <- gns$gene_name[match(top_genes, gns$gene)]
+
+par(mfrow = c(2, 3))
+for (i in seq_along(top_genes)) {
+  colors <- pal[cut(dat_use[,top_genes[i]], breaks = 100)]
+  plot(reducedDim(sds), col = colors, 
+       pch = 16, cex = 0.5, main = top_genes[i])
+  lines(sds, lwd = 2, col = 'black', type = 'lineages')
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+----
+
+```{r, echo=TRUE, error=TRUE, message=TRUE, warning=TRUE}
+umap <- Embeddings(tobj, "umap")
+celltype <- tobj$tracy_clusters
+
+lineages <- slingshot(umap, clusterLabels = celltype, start.clus = NULL, stretch = 0)
+
+```
+
+```{r Sligshot, echo=TRUE, error=TRUE, message=TRUE, warning=TRUE}
+# Convert the UMAP embeddings into a data frame for plotting
+umap_df <- as.data.frame(umap)
+colnames(umap_df) <- c("umap_1", "umap_2")
+umap_df$cell_type <- celltype
+umap_df <- cbind(umap_df, tobj@meta.data)
+
+# Extract pseudotime from the first lineage (if multiple lineages exist, you can choose the one of interest)
+umap_df$pseudotime <-  lineages@assays@data@listData[["pseudotime"]]
+
+# Plot UMAP with pseudotime as color
+sample <- ggplot(umap_df, aes(x = umap_1, y = umap_2, color = pseudotime)) +
+  geom_point(size = 1) +
+  facet_wrap(~ sample) +  # adjust "condition" as needed
+  scale_color_viridis_c(na.value = "grey50") +
+  labs(title = "Pseudotime Trajectory (Slingshot)",
+       color = "Pseudotime") +
+  theme_minimal()
+
+group <-ggplot(umap_df, aes(x = umap_1, y = umap_2, color = pseudotime)) +
+    geom_point(size = 1) +
+    scale_color_viridis_c(na.value = "grey50") +
+    facet_wrap(~ group2) +  # adjust "condition" as needed
+    labs(title = "Pseudotime by Condition",
+         x = "UMAP 1", y = "UMAP 2") +
+    theme_minimal()
+
+# save
+ggsave(filename = "~/Slingshot_Tracy/by_sample.png", plot = pseudo, width = 16, height = 16, dpi = 300)
+ggsave(filename = "~/Slingshot_Tracy/by_group2.png", plot = condition, width = 12, height = 12, dpi = 300)
+
+# density plot
+density <- ggplot(umap_df, aes(x = pseudotime, color = group2, fill = group2)) +
+    geom_density(alpha = 0.3) +
+    labs(title = "Pseudotime Density by Time Point", x = "Pseudotime", y = "Density") +
+    theme_minimal() +
+    scale_color_viridis_d() +
+    scale_fill_viridis_d()
+
+
+# bar plot
+bar <- ggplot(umap_df, aes(x = group2, y = pseudotime, fill = group2)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 1) +
+    labs(title = "Pseudotime Distribution by Time Point", x = "Time", y = "Pseudotime") +
+    theme_minimal() +
+    scale_fill_viridis_d()
+
+# save
+ggsave(filename = "~/Slingshot_Tracy/density_by_group2.png", plot = density, width = 12, height = 12, dpi = 300)
+ggsave(filename = "~/Slingshot_Tracy/bar_by_group2.png", plot = bar, width = 12, height = 12, dpi = 300)
+
+```
+
+
+```{r trend analysis, echo=TRUE, error=TRUE, message=TRUE, warning=TRUE}
+# Subset the data by condition
+Seurat::DefaultAssay(tobj) <- "RNA"
+zero <- subset(tobj, subset = group2 == "zeroM") %>%
+  SeuratObject::JoinLayers()
+withM <- subset(tobj, subset = group2 == "withM") %>%
+  SeuratObject::JoinLayers()
+
+# For zero
+cell_names_zero <- rownames(zero@meta.data)
+colnames(zero[['RNA']]@layers$counts) <- cell_names_zero
+
+# For withM
+cell_names_withM <- rownames(withM@meta.data)
+colnames(withM[['RNA']]@layers$counts) <- cell_names_withM
+
+# Extract UMAP embeddings from each subset
+zero_umap <- Embeddings(zero, "umap")
+withM_umap <- Embeddings(withM, "umap")
+
+# Extract cluster/cell type labels
+zero_clusters <- zero$tracy_clusters
+withM_clusters <- withM$tracy_clusters
+
+# For zero subset
+zero_lineages <- slingshot(zero_umap, clusterLabels = zero_clusters)
+
+# Extract pseudotime from the first (or only) lineage as a vector
+zero_pt <- slingPseudotime(zero_lineages)[, 1]  # Should be a numeric vector of length equal to number of zero cells
+
+# For withM subset
+withM_lineages <- slingshot(withM_umap, clusterLabels = withM_clusters)
+
+# Extract pseudotime from the first (or only) lineage as a vector
+withM_pt <- slingPseudotime(withM_lineages)[, 1]  # Similarly, one pseudotime value per withM cell
+
+# Extract full counts from the RNA assay of the zero subset.
+# (Using slot "counts" from the "RNA" assay)
+full_counts_zero <- as.matrix(GetAssayData(zero, assay = "RNA", slot = "counts"))
+
+# Assign cell names from metadata
+colnames(full_counts_zero) <- cell_names_zero
+
+# Retrieve gene names
+gene_names_zero <- rownames(full_counts_zero)
+cell_names_zero <- rownames(zero@meta.data)
+
+# Gene names should be present already; if not, try:
+rownames(full_counts_zero) <- gene_names_zero 
+
+# Create the SCE object
+sce_zero <- SingleCellExperiment(assays = list(counts = full_counts_zero))
+
+# Attach pseudotime (make sure length matches number of cells)
+colData(sce_zero)$pseudotime <- zero_pt
+
+# Create cellWeights: one weight per cell
+cellWeights_zero <- matrix(1, nrow = ncol(sce_zero), ncol = 1)
+
+# Extract full counts from the withM subset
+full_counts_withM <- as.matrix(GetAssayData(withM, assay = "RNA", slot = "counts"))
+
+# Assign cell names from withM meta.data
+colnames(full_counts_withM) <- cell_names_withM
+
+# Retrieve gene names
+gene_names_withM <- rownames(full_counts_withM)
+cell_names_withM <- rownames(withM@meta.data)
+
+# Gene names should be present already; if not, try:
+rownames(full_counts_withM) <- gene_names_withM
+
+# Create the SCE object for withM
+sce_withM <- SingleCellExperiment(assays = list(counts = full_counts_withM))
+
+# Attach withM pseudotime (ensure length matches ncol(sce_withM))
+colData(sce_withM)$pseudotime <- withM_pt
+
+# Create cellWeights for withM
+cellWeights_withM <- matrix(1, nrow = ncol(sce_withM), ncol = 1)
+
+# Filter out cells with NA pseudotime from sce_zero
+valid_cells <- !is.na(colData(sce_zero)$pseudotime)
+sce_zero_filtered <- sce_zero[, valid_cells]
+
+# Make sure your cellWeights match (if not already filtered correctly)
+cellWeights_zero_filtered <- cellWeights_zero[valid_cells]
+
+# Now run fitGAM on the filtered object
+sce_zero_filtered <- fitGAM(counts = counts(sce_zero_filtered),
+                            pseudotime = as.matrix(colData(sce_zero_filtered)$pseudotime), 
+                            cellWeights = cellWeights_zero_filtered,
+                            nknots = 6,
+                            verbose = TRUE)
+
+# Filter out cells with NA pseudotime from sce_zero
+valid_cells <- !is.na(colData(sce_withM)$pseudotime)
+sce_withM_filtered <- sce_withM[, valid_cells]
+
+# Make sure your cellWeights match (if not already filtered correctly)
+cellWeights_withM_filtered <- cellWeights_withM[valid_cells]
+
+# Now run fitGAM on the filtered object
+sce_withM_filtered <- fitGAM(counts = counts(sce_withM_filtered),
+                             pseudotime = as.matrix(colData(sce_withM_filtered)$pseudotime), 
+                             cellWeights = cellWeights_withM_filtered,
+                             nknots = 6,
+                             verbose = TRUE)
+
+# Test for genes with dynamic expression over pseudotime
+ATres_zero <- associationTest(sce_zero_filtered)
+ATres_withM <- associationTest(sce_withM_filtered)
+
+# Get genes with smallest p-values
+ATres_zero <- ATres_zero[order(ATres_zero$pvalue), ]
+ATres_withM <- ATres_withM[order(ATres_withM$pvalue), ]
+
+ATres_zero$padj <- p.adjust(ATres_zero$pvalue, method = "BH")
+ATres_withM$padj <- p.adjust(ATres_withM$pvalue, method = "BH")
+
+# Get significantly associated genes (FDR < 0.05)
+sig_genes_zero <- rownames(ATres_zero)[ATres_zero$padj < 0.05]
+sig_genes_withM <- rownames(ATres_withM)[ATres_withM$padj < 0.05]
+
+# Save results
+write.csv(ATres_zero, file.path(output_dir, "ATres_zero.csv"))
+write.csv(ATres_withM, file.path(output_dir, "ATres_withM.csv"))
+
+# Save significant gene lists
+write.table(sig_genes_zero, file.path(output_dir, "sig_genes_zero.txt"), 
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(sig_genes_withM, file.path(output_dir, "sig_genes_withM.txt"),
+            quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+# Save SCE objects
+saveRDS(sce_zero_filtered, file.path(output_dir, "sce_zero_fitted.rds"))
+saveRDS(sce_withM_filtered, file.path(output_dir, "sce_withM_fitted.rds"))
+
+``` 
+
+```{r}
+# Check model fit quality
+plotGeneCount(sce_zero_fitted[1:10,])
+plotGeneCount(sce_zero_fitted[1:10,])
+
+
+# Compare significant genes between conditions
+common_genes <- intersect(sig_genes_zero, sig_genes_withM)
+zero_specific <- setdiff(sig_genes_zero, sig_genes_withM)
+withM_specific <- setdiff(sig_genes_withM, sig_genes_zero)
+
+
+# Pattern test to identify genes with different expression patterns
+patternRes_zero <- patternTest(sce_zero_filtered)
+patternRes_withM <- patternTest(sce_withM_filtered)
+
+# Early vs Late response genes
+earlyDERes_zero <- earlyDETest(sce_zero_filtered)
+earlyDERes_withM <- earlyDETest(sce_withM_filtered)
+
+
+# Pseudotime distribution comparison
+library(ggpubr)
+pt_df <- data.frame(
+  Pseudotime = c(colData(sce_zero_filtered)$pseudotime,
+                 colData(sce_withM_filtered)$pseudotime),
+  Condition = c(rep("Zero", ncol(sce_zero_filtered)),
+                rep("WithM", ncol(sce_withM_filtered)))
+)
+
+ggplot(pt_df, aes(x = Pseudotime, fill = Condition)) +
+  geom_density(alpha = 0.5) +
+  theme_minimal() +
+  ggtitle("Pseudotime Distribution Comparison")
+
+
+# Pick out the top 250 genes based on p-value
+topgenes_zero <- rownames(ATres_zero[order(ATres_zero$pvalue), ])
+topgenes_withM <- rownames(ATres_withM[order(ATres_withM$pvalue), ])
+
+# Order the cells by pseudotime
+pst.ord_zero <- order(colData(sce_zero_filtered)$pseudotime, na.last = NA)
+pst.ord_withM <- order(colData(sce_withM_filtered)$pseudotime, na.last = NA)
+
+# Extract the counts for the top genes for cells ordered by pseudotime
+heatdata_zero <- assays(sce_zero_filtered)$counts[topgenes_zero, pst.ord_zero]
+heatdata_withM <- assays(sce_withM_filtered)$counts[topgenes_withM, pst.ord_withM]
+
+# Plot the heatmap of log-transformed counts
+heat_zero <- pheatmap(log1p(heatdata_zero), cluster_cols = FALSE, main = "Top 250 Dynamically Expressed Genes_zero")
+
+heat_withM <- pheatmap(log1p(heatdata_withM), cluster_cols = FALSE, main = "Top 250 Dynamically Expressed Genes_withM")
+
+# Improved heatmap with annotations
+library(ComplexHeatmap)
+
+# Scale the data for better visualization
+scaled_data_zero <- t(scale(t(log1p(heatdata_zero))))
+scaled_data_withM <- t(scale(t(log1p(heatdata_withM))))
+
+# Create pseudotime annotation
+pt_anno_zero <- HeatmapAnnotation(
+  Pseudotime = colData(sce_zero_filtered)$pseudotime[pst.ord_zero],
+  col = list(Pseudotime = circlize::colorRamp2(c(0, max(colData(sce_zero_filtered)$pseudotime, na.rm=TRUE)), 
+                                               c("yellow", "red")))
+)
+
+# Plot improved heatmap
+Heatmap(scaled_data_zero,
+        name = "Scaled\nExpression",
+        top_annotation = pt_anno_zero,
+        cluster_columns = FALSE,
+        show_column_names = FALSE,
+        column_title = "Cells (ordered by pseudotime)",
+        row_title = "Top 250 Dynamic Genes - Zero")
+
+# Venn diagram
+library(VennDiagram)
+venn.plot <- venn.diagram(
+  x = list(Zero = sig_genes_zero, WithM = sig_genes_withM),
+  filename = NULL,
+  fill = c("lightblue", "lightpink"),
+  alpha = 0.5,
+  main = "Significant Genes (FDR < 0.05)"
+)
+grid.draw(venn.plot)
+
+
+```

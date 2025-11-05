@@ -1,0 +1,4 @@
+*.rds
+*.qs
+.Rhistory
+*.log
