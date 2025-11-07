@@ -1,6 +1,7 @@
 *.rds
 *.qs
-.Rhistory
 *.log
+.Rhistory
 .Rproj.user
 .Rproj
+.RData
