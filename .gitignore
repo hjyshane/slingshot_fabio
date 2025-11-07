@@ -2,3 +2,4 @@
 *.qs
 .Rhistory
 *.log
+.Rproj.user
