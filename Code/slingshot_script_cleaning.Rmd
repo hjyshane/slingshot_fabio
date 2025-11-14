@@ -1,0 +1,198 @@
+```{r}
+library(Seurat)
+library(slingshot)
+library(tradeSeq)
+library(tidyverse)
+library(qs)
+```
+
+```{r}
+output_dir <- "~/Slingshot_Tracy/results/"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+set.seed(83)
+```
+
+```{r}
+fobj <- readRDS("~/Slingshot_Tracy/Fabio_finalobj.rds")
+
+# Seurat::Idents(fobj) <- "tracy_clusters"
+# sub <- subset(fobj, subset = tracy_clusters %in% c("CA1", "CA3", "DG", "Tbr2_Prog", "KI67_Prog", "Pax6_Prog"))
+# saveRDS("~/Slingshot_Tracy/sub.rds")
+
+sub <-  readRDS("~/Slingshot_Tracy/sub.rds")
+```
+
+```{r}
+DefaultAssay(fobj) <- "RNA"
+Idents(fobj) <- "tracy_clusters"
+fobj <- JoinLayers(fobj)
+```
+
+```{r}
+DefaultAssay(fobj) <- "RNA"
+Idents(fobj) <- "tracy_clusters"
+
+fobj <- SCTransform(fobj, verbose = FALSE)
+fobj <- RunPCA(fobj, npcs = 50, verbose = FALSE)
+fobj <- RunUMAP(fobj, dims = 1:30, verbose = FALSE)
+fobj <- FindNeighbors(fobj, dims = 1:30)
+fobj <- FindClusters(fobj, resolution = 0.4)
+
+DefaultAssay(sub) <- "RNA"
+Idents(sub) <- "tracy_clusters"
+
+sub <- SCTransform(sub, verbose = FALSE)
+sub <- RunPCA(sub, npcs = 50, verbose = FALSE)
+sub <- RunUMAP(sub, dims = 1:30, verbose = FALSE)
+sub <- FindNeighbors(sub, dims = 1:30)
+sub <- FindClusters(sub, resolution = 0.4)
+
+```
+
+```{r}
+
+saveRDS(fobj, file.path("~/Slingshot_Tracy/fobj_sct.rds"))
+saveRDS(sub, file.path("~/Slingshot_Tracy/fobj_sct.rds"))
+
+```
+
+```{r}
+PCAPlot(fobj, label = T)
+PCAPlot(sub, label = T)
+```
+
+```{r}
+fobj <- readRDS("~/Slingshot_Tracy/fobj_sct.rds")
+sub <-  readRDS("~/Slingshot_Tracy/fobj_sct.rds")
+
+```
+
+```{r}
+fobj <- NormalizeData(fobj)
+sub <- NormalizeData(sub)
+```
+
+
+```{r}
+fobj_sce <- as.SingleCellExperiment(fobj)
+sub_sce <- as.SingleCellExperiment(sub)
+
+pca_fobj <- Embeddings(fobj, "pca")
+pca_sub  <- Embeddings(sub,  "pca")
+
+reducedDims(fobj_sce)$PCA <- pca_fobj[colnames(fobj_sce), , drop = FALSE]
+reducedDims(sub_sce)$PCA  <- pca_sub [colnames(sub_sce),  , drop = FALSE]
+
+Idents(fobj) <- "tracy_clusters"
+Idents(sub) <- "tracy_clusters"
+
+colData(fobj_sce)$cluster <- factor(Idents(fobj)[colnames(fobj_sce)])
+colData(sub_sce)$cluster  <- factor(Idents(sub) [colnames(sub_sce)])
+
+stopifnot(
+  identical(rownames(reducedDims(fobj_sce)$PCA), colnames(fobj_sce)),
+  identical(rownames(reducedDims(sub_sce)$PCA),  colnames(sub_sce))
+)
+```
+
+```{r}
+fobj_sce <- slingshot(
+  fobj_sce,
+  clusterLabels = "tracy_clusters",
+  reducedDim    = "PCA",
+  start.clus    = "Pax6_Prog",
+  end.clus      = c("CA1","CA3","DG"),
+  stretch       = 1.0
+)
+
+sub_sce <- slingshot(
+  sub_sce,
+  clusterLabels = "tracy_clusters",
+  reducedDim    = "PCA",
+  start.clus    = "Pax6_Prog",
+  end.clus      = c("CA1","CA3","DG"),
+  stretch       = 1.0
+)
+```
+```{r}
+saveRDS(fobj_sce, file.path("~/Slingshot_Tracy/fobj_sce.rds"))
+saveRDS(sub_sce, file.path("~/Slingshot_Tracy/sub_sce.rds"))
+```
+
+```{r}
+fobj_sce <- readRDS("~/Slingshot_Tracy/fobj_sce.rds")
+sub_sce  <- readRDS("~/Slingshot_Tracy/sub_sce.rds")
+```
+
+
+```{r}
+fobj_sds <- SlingshotDataSet(fobj_sce)
+fobj_pt  <- slingPseudotime(fobj_sce)
+
+sub_sds <- SlingshotDataSet(sub_sce)
+sub_pt  <- slingPseudotime(sub_sce)
+```
+
+```{r}
+saveRDS(fobj_sds, file.path("~/Slingshot_Tracy/fobj_sds.rds"))
+saveRDS(fobj_pt,  file.path("~/Slingshot_Tracy/fobj_pt.rds"))
+saveRDS(sub_sds,  file.path("~/Slingshot_Tracy/sub_sds.rds"))
+saveRDS(sub_pt,   file.path("~/Slingshot_Tracy/sub_pt.rds"))
+```
+
+```{r}
+# Load saved objects
+fobj_sds <- readRDS("~/Slingshot_Tracy/fobj_sds.rds")
+fobj_pt  <- readRDS("~/Slingshot_Tracy/fobj_pt.rds")
+sub_sds  <- readRDS("~/Slingshot_Tracy/sub_sds.rds")
+sub_pt   <- readRDS("~/Slingshot_Tracy/sub_pt.rds")
+```
+
+```{r}
+head(fobj_pt)
+head(sub_pt)
+
+```
+
+```{r}
+plot(reducedDims(fobj_sce)$PCA, col = as.factor(fobj_sce$tracy_clusters), pch = 16, cex = 0.5)
+lines(fobj_sds, lwd = 2, col = 'black')
+plot(reducedDims(sub_sce)$PCA, col = as.factor(sub_sce$tracy_clusters), pch = 16, cex = 0.5)
+lines(sub_sds, lwd = 2, col = 'black')
+
+```
+
+```{r}
+# gene expression smoothing with tradeSeq
+fobj_counts <- as.matrix(assays(fobj_sce)$counts)
+sub_counts  <- as.matrix(assays(sub_sce)$counts)
+
+fobj_gam <- fitGAM(fobj_sds,
+  counts    = fobj_counts,
+  pseudotime = fobj_pt,
+  nknots     = 6,
+  verbose    = TRUE
+)
+
+sub_gam <- fitGAM(sub_sds,
+  counts    = sub_counts,
+  pseudotime = sub_pt,
+  nknots     = 6,
+  verbose    = TRUE
+)
+
+saveRDS(fobj_gam, file.path("~/Slingshot_Tracy/fobj_gam.rds"))
+saveRDS(sub_gam,  file.path("~/Slingshot_Tracy/sub_gam.rds"))
+```
+
+```{r}
+fobj_gam <- readRDS("~/Slingshot_Tracy/fobj_gam.rds")
+sub_gam  <- readRDS("~/Slingshot_Tracy/sub_gam.rds")
+
+```
+
+```{r}
+
+
+```

@@ -1,35 +1,19 @@
-```{r}
 library(Seurat)
 library(slingshot)
-library(tradeSeq)
 library(tidyverse)
-library(qs)
-```
 
-```{r}
+options(future.globals.maxSize = 128000 * 1024^2)
+
 output_dir <- "~/Slingshot_Tracy/results/"
-dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
-set.seed(83)
-```
-
-```{r}
 fobj <- readRDS("~/Slingshot_Tracy/Fabio_finalobj.rds")
+sub <-  readRDS("~/Slingshot_Tracy/Fabio_sub.rds")
 
-# Seurat::Idents(fobj) <- "tracy_clusters"
-# sub <- subset(fobj, subset = tracy_clusters %in% c("CA1", "CA3", "DG", "Tbr2_Prog", "KI67_Prog", "Pax6_Prog"))
-# saveRDS("~/Slingshot_Tracy/sub.rds")
-
-sub <-  readRDS("~/Slingshot_Tracy/sub.rds")
-```
-
-```{r}
 DefaultAssay(fobj) <- "RNA"
 Idents(fobj) <- "tracy_clusters"
 fobj <- JoinLayers(fobj)
-```
 
-```{r}
+
 DefaultAssay(fobj) <- "RNA"
 Idents(fobj) <- "tracy_clusters"
 
@@ -46,16 +30,12 @@ sub <- SCTransform(sub, verbose = FALSE)
 sub <- RunPCA(sub, npcs = 50, verbose = FALSE)
 sub <- RunUMAP(sub, dims = 1:30, verbose = FALSE)   
 sub <- FindNeighbors(sub, dims = 1:30)
-sub <- FindClusters(sub, resolution = 0.4)     
+sub <- FindClusters(sub, resolution = 0.4)  
 
-```
 
-```{r}
-PCAPlot(fobj, label = T)
-PCAPlot(sub, label = T)
-```
+saveRDS(fobj, file.path("~/Slingshot_Tracy/fobj_sct.rds"))
+saveRDS(sub, file.path("~/Slingshot_Tracy/sub_sct.rds"))
 
-```{r}
 
 fobj_sce <- as.SingleCellExperiment(fobj)
 sub_sce <- as.SingleCellExperiment(sub)
@@ -76,9 +56,7 @@ stopifnot(
   identical(rownames(reducedDims(fobj_sce)$PCA), colnames(fobj_sce)),
   identical(rownames(reducedDims(sub_sce)$PCA),  colnames(sub_sce))
 )
-```
 
-```{r}
 fobj_sce <- slingshot(
   fobj_sce,
   clusterLabels = "tracy_clusters",
@@ -96,18 +74,8 @@ sub_sce <- slingshot(
   end.clus      = c("CA1","CA3","DG"),
   stretch       = 1.0
 )
-```
-```{r}
+
+
+
 saveRDS(fobj_sce, file.path("~/Slingshot_Tracy/fobj_sce.rds"))
 saveRDS(sub_sce, file.path("~/Slingshot_Tracy/sub_sce.rds"))
-```
-
-
-```{r}
-fobj_sds <- SlingshotDataSet(fobj_sce)
-fobj_pt  <- slingPseudotime(fobj_sce) 
-
-sub_sds <- SlingshotDataSet(sub_sce)
-sub_pt  <- slingPseudotime(sub_sce)   
-```
-
